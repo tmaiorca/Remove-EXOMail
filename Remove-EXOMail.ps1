@@ -93,7 +93,7 @@ Write-Host "DATE: $startDate"
 $msgTrace = Get-MessageTrace -SenderAddress $from -StartDate $startDate -EndDate $endDate | Where {$_.Subject -like "*$subject*"} 
 $recipients = ($msgTrace.RecipientAddress) | Sort -Unique 
     
-    #Storing only RVCC mailboxes & sorting uniquely to remove any duplicates based on alias/primary SMTP Address 
+    #Storing only mailboxes & sorting uniquely to remove any duplicates based on alias/primary SMTP Address 
     $recipients = ForEach ($mailbox in $recipients) { 
     try { 
         (Get-Mailbox $mailbox -ErrorAction Stop).PrimarySmtpAddress 
