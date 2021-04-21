@@ -1,8 +1,8 @@
-﻿<#.............................................................................................................................................................................................. 
-Purpose: Email removal script | Runs an Exchange Online Message Trace to get recipient list, then passes them into a KQL-formmated Query for a Security & Compliance Center Compliance Search 
+<#............................................................................................................................................................................................ 
+Purpose: Searches for email based on KQL query syntax and prompts to proceed with purge. 
 Developed By: Maiorca, Troy 
-Last Updated: 3/25/21 
-..............................................................................................................................................................................................#> 
+Last Updated: 4/1/21 
+............................................................................................................................................................................................#> 
 
 #Module prerequisite check & download using PSGallery 
 $modules = "ExchangeOnlineManagement" 
@@ -11,14 +11,14 @@ Write-Host 'Checking for prerequisite module...' -ForegroundColor Yellow
 $modules | ForEach-Object { 
 if (Get-Module -ListAvailable -Name $_) { 
     Write-Host "$_ - installed" -ForegroundColor Green  
-}  
+} 
 
 else { 
     Set-PSRepository PSGallery -InstallationPolicy Trusted 
     $PSGalleryCheck = Find-Module $_ 
     Write-Host `n"$_ - not installed" -ForegroundColor Red         
-    Write-Host "Downloading $_ from PSGallery..." -ForegroundColor Yellow -NoNewline  
-
+    Write-Host "Downloading $_ from PSGallery..." -ForegroundColor Yellow -NoNewline 
+       
     $PSGalleryCheck | Install-Module 
         if (Get-Module -ListAvailable $_) { 
             Write-Host `n"$_ module installed successfully!" -ForegroundColor Green 
@@ -31,21 +31,21 @@ else {
         } 
     }            
 } 
+
+
 Write-Host `n`n'---Automated Email Deletion Script---' -ForegroundColor Green 
 Write-Host 'Any emails purged from this script will be placed in the users recoverable items location for easy recover.' -ForegroundColor Yellow 
- 
+
 #Connecting to Exchange Online using modern authentication (to find list of recipients first using message trace) 
 Write-Host `n`n'Connecting to Exchange Online to perform a message trace in order to receive recipient list...' -ForegroundColor Yellow 
 Connect-ExchangeOnline 
 
 #Defining search parameters for new eDiscovery / Compliance Search | For more information on Keywork Query Language Syntax (KQL): https://docs.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference 
 Write-Host 'Proceeding to gather Message Trace & Compliance Search criteria...' -ForegroundColor Yellow 
-#Prompt: SENDER
+#Prompt: FROM 
 $from = Read-Host "SENDER" 
-
 #Prompt: SUBJECT 
 $subject = Read-Host "SUBJECT (optional)" 
-
 #Prompt: DATE 
 Write-Host 'DATE:' 
 Write-Host "1. Today's date (starting at 12:00AM)" -Foregroundcolor Yellow 
@@ -60,7 +60,8 @@ $choice1 = Read-Host "Please select one of the options above. The search will be
     if ($choice1 -eq '1') { 
         $startDate = (Get-Date -Hour 0 -Minute 0 -Second 0).ToString("MM/dd/yyyy") 
         $endDate = Get-Date 
-    }    
+    } 
+ 
     #Option 2- Manually specifying date 
     elseif ($choice1 -eq '2') { 
         Write-Host `n"Specify the date in either of the following formats. The search will be done from the date entered at 12:00AM: yyyy-MM-dd or MM/dd/yyyy" -ForegroundColor Yellow 
@@ -77,11 +78,12 @@ $choice1 = Read-Host "Please select one of the options above. The search will be
         $endDate = Get-Date 
         $endDate = [datetime]$endDate 
     } 
+
     #Option 3 - Last 7 days 
     if ($choice1 -eq '3') { 
         $startDate = (Get-Date -Hour 0 -Minute 0 -Second 0).AddDays(-7).ToString("MM/dd/yyyy") 
         $endDate = Get-Date 
-    }  
+    } 
 
 #Running Message Trace based on selected option 
 Write-Host `n"Performing message trace based on the following values:" -ForegroundColor Yellow 
@@ -89,18 +91,31 @@ Write-Host "SENDER: $from"
 Write-Host "SUBJECT: $subject" 
 Write-Host "DATE: $startDate" 
 $msgTrace = Get-MessageTrace -SenderAddress $from -StartDate $startDate -EndDate $endDate | Where {$_.Subject -like "*$subject*"} 
-$recipients = $msgTrace.RecipientAddress 
+$recipients = ($msgTrace.RecipientAddress) | Sort -Unique 
+    
+    #Storing only RVCC mailboxes & sorting uniquely to remove any duplicates based on alias/primary SMTP Address 
+    $recipients = ForEach ($mailbox in $recipients) { 
+    try { 
+        (Get-Mailbox $mailbox -ErrorAction Stop).PrimarySmtpAddress 
+        } 
+    catch { 
+        } 
+    } 
+    $recipients = $recipients | Sort -Unique 
+     
     #Displaying count of recipients that received matching email content 
     $count = $recipients.count 
     Write-Host `n"Total Recipients: "$count -ForegroundColor Yellow 
         #If no recipients, exit script (won't pass variable correctly into S&C Compliance Search otherwise) 
         if ($count -eq 0) { 
             Write-Host "No recipients were found based on the entered values. Exiting script!!" -ForegroundColor Red 
+            Disconnect-ExchangeOnline -Confirm:$false 
+            Exit 
         } 
-
  
 #Disconnecting from Exchange Online 
 Disconnect-ExchangeOnline -Confirm:$false | Out-Null 
+
 
 #Connecting to Security & Compliance Center using modern authentication (searching & purging emails found from recipients found in message trace) 
 Write-Host `n`n'Connecting to Security & Compliance Center to purge matched emails based on recipients found from the Message Trace...' -ForegroundColor Yellow 
@@ -118,31 +133,35 @@ Write-Host "Press 'a' to abort, or any other key to continue with Compliance Sea
         Disconnect-ExchangeOnline -Confirm:$false 
         Exit 
     } 
+
     #Format KQL based on Sender, Subject, and Date values 
     else { 
-        $ComplianceSearchName = "Email Removal-$(Get-Date -Format yyyy-MM-dd_HH-mm)" 
+        $ComplianceSearchName = "Spam_Deletion" 
         New-ComplianceSearch -Name $ComplianceSearchName -ExchangeLocation $recipients -ContentMatchQuery " 
         (From:$from) AND 
         (Subject:$subject) AND 
         (Sent>=$startDate) 
         " 
-    }  
+    } 
 
+ 
 #Start Compliance Search using formatted KQL Query & perform a status check loop until completed 
 Write-Host `n'Starting Compliance Search' -NoNewline -ForegroundColor Yellow 
 Start-ComplianceSearch -Identity "$ComplianceSearchName" 
-While ((Get-ComplianceSearch "$ComplianceSearchName" | Select-Object -expand Status) -ne "Completed") {
+While ((Get-ComplianceSearch "$ComplianceSearchName" | Select-Object -expand Status) -ne "Completed") { 
     Start-Sleep 5; write-host "." -NoNewline 
     } 
-    
-$contentCheck = "C:\temp\Email Removal-$(Get-Date -Format yyyy-MM-dd_HH-mm).csv" 
-Write-Host 'Compliance Search completed!' -ForegroundColor Green  
 
+
+$contentCheck = "C:\temp\Spam_Message_Details_$(Get-Date -Format yyyy-MM-dd_HH-mm).csv" 
+Write-Host 'Compliance Search completed!' -ForegroundColor Green 
+ 
 #Export Compliance Search to a local file for content validation before purge action 
 Get-ComplianceSearch -Identity "$ComplianceSearchName" -Resultsize Unlimited | FL > "$contentCheck" 
 Write-Host `n"Exported content to the following location: $contentCheck`nPlease validate the content before proceeding with content removal." -ForegroundColor Yellow 
 Start-Process $contentCheck 
 
+ 
 #Final prompt before purging content returned from Compliance Search results 
 Write-Host `n'Would you like to proceed with a soft purge of all results included in the exported Complinace Search?' -ForegroundColor Yellow 
 Write-Host "Press 'a' to abort, or any other key to continue soft purge:" -ForegroundColor Yellow -NoNewline 
@@ -155,18 +174,19 @@ Write-Host "Press 'a' to abort, or any other key to continue soft purge:" -Foreg
         Disconnect-ExchangeOnline -Confirm:$false 
         Exit 
     } 
+
     #Proceed with compliance search soft purge 
     else { 
         Write-Host `n"Proceeding with soft deletion of matched content" -NoNewline -ForegroundColor Yellow 
         New-ComplianceSearchAction -SearchName "$ComplianceSearchName" -Purge -PurgeType SoftDelete -Confirm:$false | Out-Null 
-    }  
+    } 
 
 #Setting Compliance Search action variable for check and continue  
 Start-sleep 5 #seconds 
 $ComplianceSearchAction = $ComplianceSearchName + "_Purge" 
 While ((Get-ComplianceSearchAction $ComplianceSearchAction | Select-Object -expand Status) -ne "Completed") { 
     Start-Sleep 5; write-host "." -NoNewline 
-} 
+    } 
 
 #Remvoing Compliance Search & Compliance Search Action 
 Write-Host 'Soft delete of matched content completed!' -ForegroundColor Green 
@@ -176,10 +196,10 @@ Remove-ComplianceSearch -identity $ComplianceSearchName -Confirm:$false
 #Disconnecting from Security & Compliance Center 
 Write-Host `n"" 
 Disconnect-ExchangeOnline -Confirm:$false 
-
+ 
 #Prompt to exit script 
 Write-Host `n"Disconnected from Exchange Online & removed the Compliance Search. Press any key to exit." -ForegroundColor Yellow -NoNewline 
 $response = Read-Host 
 if ($response){ 
     Exit 
-} 
+    }
